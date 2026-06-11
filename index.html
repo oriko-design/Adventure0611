@@ -1417,7 +1417,61 @@ function projectToScreen(pos) {
 // ============================================================
 const AC = window.AudioContext || window.webkitAudioContext;
 const audio = AC ? new AC() : null;
-let beamOsc = null;
+let beamOsc = null, beamSrc = null;
+
+// ---------- 外部効果音(assets/sfx/ にファイルがあれば優先・無ければシンセ音) ----------
+// 効果音ラボ( https://soundeffect-lab.info/ )等の素材を下記ファイル名で配置すると差し替わる
+const SFX_FILES = {
+  slash: 'slash1.mp3',          // 剣で斬る1
+  slash2: 'slash2.mp3',         // 剣で斬る2
+  hit: 'hit.mp3',               // 斬撃が当たる/打撃
+  fireball: 'fireball.mp3',     // 火炎魔法
+  explosion: 'explosion.mp3',   // 爆発
+  bolt: 'bolt.mp3',             // 敵の魔弾発射
+  heal: 'heal.mp3',             // 回復魔法
+  shield: 'shield.mp3',         // 防御魔法
+  dash: 'dash.mp3',             // ダッシュ
+  hurt: 'hurt.mp3',             // 被弾
+  die: 'die.mp3',               // 死亡
+  pickup: 'pickup.mp3',         // クリスタル取得
+  enemyDie: 'enemy-die.mp3',    // 敵撃破
+  beamLoop: 'beam-loop.mp3',    // 魔法ビーム(ループ素材)
+  // プレイヤー男性ボイス
+  voiceAttack1: 'voice-attack1.mp3', // 攻撃の掛け声1「えい!」等
+  voiceAttack2: 'voice-attack2.mp3', // 攻撃の掛け声2「やあ!」等
+  voiceSpin: 'voice-spin.mp3',       // 回転斬り「とりゃー!」等
+  voiceCast: 'voice-cast.mp3',       // 魔法発動の掛け声
+  voiceHurt: 'voice-hurt.mp3',       // 被弾「ぐっ!」等
+  voiceDie: 'voice-die.mp3',         // 断末魔
+  voiceDash: 'voice-dash.mp3',       // ダッシュの掛け声
+  voiceHeal: 'voice-heal.mp3',       // 回復時の一言
+};
+const sfxBuffers = {};
+if (audio) {
+  for (const [k, f] of Object.entries(SFX_FILES)) {
+    fetch('assets/sfx/' + f)
+      .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+      .then(ab => audio.decodeAudioData(ab))
+      .then(b => { sfxBuffers[k] = b; })
+      .catch(() => { /* ファイルが無ければシンセ音のまま */ });
+  }
+}
+function playBuf(k, vol = 0.8, rate = 1) {
+  const b = sfxBuffers[k];
+  if (!b || !audio) return false;
+  const src = audio.createBufferSource();
+  src.buffer = b;
+  src.playbackRate.value = rate;
+  const gn = audio.createGain(); gn.gain.value = vol;
+  src.connect(gn).connect(audio.destination);
+  src.start();
+  return true;
+}
+let voiceUntil = 0; // ボイスの連発防止
+function voice(k, vol = 0.9) {
+  if (performance.now() < voiceUntil) return;
+  if (playBuf(k, vol, rand(0.97, 1.03))) voiceUntil = performance.now() + 350;
+}
 function blip(freq, dur, type = 'square', vol = 0.18, slide = 0.6) {
   if (!audio) return;
   const o = audio.createOscillator(), gn = audio.createGain();
@@ -1429,18 +1483,33 @@ function blip(freq, dur, type = 'square', vol = 0.18, slide = 0.6) {
   o.start(); o.stop(audio.currentTime + dur);
 }
 const sfx = {
-  slash() { blip(420, 0.14, 'sawtooth', 0.13, 0.4); blip(900, 0.08, 'square', 0.06, 0.3); },
-  hit() { blip(180, 0.16, 'square', 0.16, 0.5); },
-  fireball() { blip(220, 0.5, 'sawtooth', 0.14, 0.25); },
-  heal() { blip(520, 0.3, 'sine', 0.14, 1.6); blip(780, 0.4, 'sine', 0.1, 1.5); },
-  dash() { blip(300, 0.22, 'sine', 0.12, 2.2); },
-  hurt() { blip(140, 0.3, 'sawtooth', 0.2, 0.5); },
-  die() { blip(90, 0.9, 'sawtooth', 0.22, 0.3); },
-  pickup() { blip(880, 0.18, 'sine', 0.12, 1.5); blip(1320, 0.25, 'sine', 0.08, 1.2); },
-  enemyDie() { blip(320, 0.4, 'square', 0.14, 0.2); },
-  shield() { blip(440, 0.35, 'triangle', 0.13, 1.3); },
+  slash() { if (playBuf(Math.random() < 0.5 ? 'slash' : 'slash2', 0.9, rand(0.95, 1.08))) return; blip(420, 0.14, 'sawtooth', 0.13, 0.4); blip(900, 0.08, 'square', 0.06, 0.3); },
+  hit() { if (playBuf('hit', 0.7, rand(0.9, 1.1))) return; blip(180, 0.16, 'square', 0.16, 0.5); },
+  fireball() { if (playBuf('fireball', 0.85)) return; blip(220, 0.5, 'sawtooth', 0.14, 0.25); },
+  explosion() { if (playBuf('explosion', 0.9)) return; blip(90, 0.4, 'sawtooth', 0.2, 0.4); },
+  bolt() { if (playBuf('bolt', 0.6)) return; blip(740, 0.22, 'sine', 0.1, 0.45); },
+  heal() { if (playBuf('heal', 0.85)) return; blip(520, 0.3, 'sine', 0.14, 1.6); blip(780, 0.4, 'sine', 0.1, 1.5); },
+  dash() { if (playBuf('dash', 0.8)) return; blip(300, 0.22, 'sine', 0.12, 2.2); },
+  hurt() { if (playBuf('hurt', 0.8)) return; blip(140, 0.3, 'sawtooth', 0.2, 0.5); },
+  die() { if (playBuf('die', 0.9)) return; blip(90, 0.9, 'sawtooth', 0.22, 0.3); },
+  pickup() { if (playBuf('pickup', 0.8)) return; blip(880, 0.18, 'sine', 0.12, 1.5); blip(1320, 0.25, 'sine', 0.08, 1.2); },
+  enemyDie() { if (playBuf('enemyDie', 0.85)) return; blip(320, 0.4, 'square', 0.14, 0.2); },
+  shield() { if (playBuf('shield', 0.85)) return; blip(440, 0.35, 'triangle', 0.13, 1.3); },
   beamStart() {
-    if (!audio || beamOsc) return;
+    if (!audio) return;
+    if (sfxBuffers.beamLoop) {
+      if (beamSrc) return;
+      const src = audio.createBufferSource();
+      src.buffer = sfxBuffers.beamLoop; src.loop = true;
+      const gn = audio.createGain();
+      gn.gain.setValueAtTime(0.0001, audio.currentTime);
+      gn.gain.exponentialRampToValueAtTime(0.5, audio.currentTime + 0.12);
+      src.connect(gn).connect(audio.destination);
+      src.start();
+      beamSrc = { src, gn };
+      return;
+    }
+    if (beamOsc) return;
     const o = audio.createOscillator(), gn = audio.createGain(), lfo = audio.createOscillator(), lg = audio.createGain();
     o.type = 'sawtooth'; o.frequency.value = 160;
     lfo.frequency.value = 22; lg.gain.value = 28;
@@ -1452,6 +1521,11 @@ const sfx = {
     beamOsc = { o, gn, lfo };
   },
   beamStop() {
+    if (beamSrc) {
+      beamSrc.gn.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.15);
+      beamSrc.src.stop(audio.currentTime + 0.2);
+      beamSrc = null;
+    }
     if (!beamOsc) return;
     const { o, gn, lfo } = beamOsc;
     gn.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.15);
@@ -1572,6 +1646,7 @@ function trySkill(name) {
       player.attackDir *= -1;
       cooldowns.sword = cdMax.sword;
       sfx.slash();
+      voice(player.attackDir > 0 ? 'voiceAttack1' : 'voiceAttack2');
       meleeHit(2.9, Math.PI * 0.85, 34);
       break;
     case 'claw':
@@ -1579,12 +1654,14 @@ function trySkill(name) {
       player.spinT = 0.55;
       cooldowns.claw = cdMax.claw;
       sfx.slash(); setTimeout(() => sfx.slash(), 140);
+      voice('voiceSpin');
       meleeHit(3.4, Math.PI * 2, 50);
       break;
     case 'dash': {
       cooldowns.dash = cdMax.dash;
       player.dashT = 0.28;
       sfx.dash();
+      voice('voiceDash');
       const f = camForward();
       const iv = inputVec();
       const dir = iv.lengthSq() > 0 ? iv : f;
@@ -1597,6 +1674,7 @@ function trySkill(name) {
       cooldowns.heal = cdMax.heal;
       player.hp = Math.min(player.maxHp, player.hp + 40);
       sfx.heal();
+      voice('voiceHeal');
       showDamage(player.pos.clone().add(new THREE.Vector3(0, 2.2, 0)), '+40', true);
       burst(player.pos.clone().add(new THREE.Vector3(0, 1.2, 0)), 0x7dffb8, 22, 4, 0.35);
       break;
@@ -1612,6 +1690,7 @@ function trySkill(name) {
       player.mp -= 18;
       cooldowns.fire = cdMax.fire;
       sfx.fireball();
+      voice('voiceCast');
       player.castT = Math.max(player.castT, 0.3);
       const origin = player.pos.clone().add(new THREE.Vector3(0, 1.4, 0));
       shootFireball(origin, camForward());
@@ -1846,6 +1925,7 @@ function hurtPlayer(dmg) {
   player.hp -= dmg;
   player.hurtCd = 0.5;
   sfx.hurt();
+  voice('voiceHurt');
   const hurtEl = document.getElementById('hurt');
   hurtEl.style.opacity = 1;
   setTimeout(() => hurtEl.style.opacity = 0, 220);
@@ -1853,6 +1933,7 @@ function hurtPlayer(dmg) {
     player.hp = 0;
     player.dead = true;
     sfx.die();
+    playBuf('voiceDie', 1);
     sfx.beamStop();
     document.exitPointerLock?.();
     document.getElementById('goScore').textContent = `SCORE ${score} ／ 討伐 ${kills} ／ クリスタル ${crystalGot}`;
@@ -2038,7 +2119,7 @@ function update(dt, t) {
     if (explode) {
       burst(fb.g.position, 0xffaa50, 34, 9, 0.55);
       burst(fb.g.position, 0xfff3c8, 16, 5, 0.4);
-      blip(90, 0.4, 'sawtooth', 0.2, 0.4);
+      sfx.explosion();
       for (const e of enemies) {
         if (e.dead) continue;
         const d = fb.g.position.distanceTo(e.pos.clone().add(new THREE.Vector3(0, e.aimY, 0)));
@@ -2093,7 +2174,7 @@ function update(dt, t) {
         const to = player.pos.clone(); to.y += 1.2;
         shootEnemyBolt(from, to.sub(from).normalize());
         e.hitFlash = Math.max(e.hitFlash, 0.12);
-        blip(740, 0.22, 'sine', 0.1, 0.45);
+        sfx.bolt();
       }
     } else { // ゴーレム: 近接追跡
       if (dist > 38 || player.dead) e.state = 'wander';
