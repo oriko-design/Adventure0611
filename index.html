@@ -185,10 +185,14 @@
 <div id="gameover"><h2>YOU DIED</h2><div id="goScore" style="color:#e8c9b8"></div><button id="goRetry">もう一度挑戦する</button></div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /* ============================================================
    Mist of Ruins — 三人称 冒険探索アクション
@@ -340,7 +344,31 @@ groundGeo.rotateX(-Math.PI / 2);
   groundGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   groundGeo.computeVertexNormals();
 }
-const ground = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+// 地面のディテール(土・草の細かいまだら模様。頂点カラーに乗算される)
+function makeGroundDetailTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f4f4f0'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 5000; i++) {
+    const v = 70 + Math.random() * 110 | 0;
+    g.fillStyle = `rgba(${v},${v + 10},${v - 15},${rand(0.06, 0.22)})`;
+    g.fillRect(rand(0, 255), rand(0, 255), rand(1, 3), rand(1, 3));
+  }
+  for (let i = 0; i < 70; i++) {
+    const x = rand(0, 256), y = rand(0, 256), r = rand(6, 26);
+    const grad = g.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(90,100,60,${rand(0.05, 0.14)})`);
+    grad.addColorStop(1, 'rgba(90,100,60,0)');
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(64, 64);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const ground = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ vertexColors: true, map: makeGroundDetailTexture() }));
 ground.receiveShadow = true;
 scene.add(ground);
 
@@ -378,41 +406,83 @@ waterUniforms.uTime = water.material.uniforms.uTime;
 water.position.y = WATER_Y;
 scene.add(water);
 
-// ---------------- 草(インスタンス + 風) ----------------
+// ---------------- 風(共有uniform & 植生用シェーダーフック) ----------------
 const grassUniform = { value: 0 };
-{
-  const blade = new THREE.PlaneGeometry(0.16, 0.95, 1, 2);
-  blade.translate(0, 0.45, 0);
-  const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, color: 0xffffff });
+function addWind(mat, strength = 1) {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uTime = grassUniform;
-    sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
+    sh.uniforms.uWind = { value: strength };
+    sh.vertexShader = 'uniform float uTime; uniform float uWind;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
       #include <begin_vertex>
+      vec4 ww = modelMatrix * vec4(position, 1.0);
       #ifdef USE_INSTANCING
-        vec4 gw = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        transformed.x += sin(uTime * 2.2 + gw.x * 0.6 + gw.z * 0.4) * 0.16 * position.y;
-        transformed.z += cos(uTime * 1.7 + gw.x * 0.4) * 0.1 * position.y;
+        ww = modelMatrix * instanceMatrix * vec4(position, 1.0);
       #endif
+      float wGust = 0.7 + 0.3 * sin(uTime * 0.6 + ww.x * 0.04 + ww.z * 0.05);
+      float wAmp = uWind * wGust * max(position.y, 0.0);
+      transformed.x += sin(uTime * 2.1 + ww.x * 0.7 + ww.z * 0.43) * 0.14 * wAmp;
+      transformed.z += cos(uTime * 1.6 + ww.x * 0.5 + ww.z * 0.61) * 0.09 * wAmp;
     `);
   };
-  const COUNT = 5200;
+}
+// 有機的な葉群ジオメトリ(位置依存ノイズで変形するので面割れしない)
+function makeClumpGeo(r, detail = 1, jitter = 0.45, squash = 0.78) {
+  const g = new THREE.IcosahedronGeometry(r, detail);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const n = 1 + fbm(p.getX(i) * 2.2 + 7.3, p.getZ(i) * 2.4 - 4.1) * jitter
+                + fbm(p.getY(i) * 3.1 - 2.2, p.getX(i) * 2.9 + 5.5) * jitter * 0.5;
+    p.setXYZ(i, p.getX(i) * n, p.getY(i) * n * squash, p.getZ(i) * n);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+// ---------------- 草(房状クラスタ + 先細りブレード + 風) ----------------
+{
+  // しなった先細りブレード。根元は暗く先端は明るいグラデーション
+  const blade = new THREE.PlaneGeometry(0.13, 1, 1, 4);
+  blade.translate(0, 0.5, 0);
+  {
+    const p = blade.attributes.position;
+    const cols = new Float32Array(p.count * 3);
+    for (let i = 0; i < p.count; i++) {
+      const y = p.getY(i);
+      p.setX(i, p.getX(i) * (1 - y * 0.8));
+      p.setZ(i, y * y * 0.35);
+      const b = 0.45 + y * 0.75;
+      cols[i * 3] = b * 0.9; cols[i * 3 + 1] = b * 1.05; cols[i * 3 + 2] = b * 0.8;
+    }
+    blade.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  }
+  const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, vertexColors: true });
+  addWind(mat, 1);
+  const COUNT = 15000, PER_CLUMP = 14;
   const grass = new THREE.InstancedMesh(blade, mat, COUNT);
+  grass.receiveShadow = true;
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
-  const col = new THREE.Color();
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const col = new THREE.Color(), clumpCol = new THREE.Color();
   let placed = 0, guard = 0;
-  while (placed < COUNT && guard++ < COUNT * 12) {
-    const x = rand(-WORLD / 2 + 10, WORLD / 2 - 10), z = rand(-WORLD / 2 + 10, WORLD / 2 - 10);
-    const h = getHeight(x, z);
-    if (h < WATER_Y + 0.45 || h > 7.5) continue;
-    p.set(x, h - 0.05, z);
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rand(0, Math.PI));
-    const sc = rand(0.7, 1.5);
-    s.set(sc, sc * rand(0.8, 1.4), sc);
-    m.compose(p, q, s);
-    grass.setMatrixAt(placed, m);
-    col.setHSL(rand(0.24, 0.31), rand(0.5, 0.7), rand(0.3, 0.45));
-    grass.setColorAt(placed, col);
-    placed++;
+  while (placed < COUNT && guard++ < 9000) {
+    const cx = rand(-WORLD / 2 + 10, WORLD / 2 - 10), cz = rand(-WORLD / 2 + 10, WORLD / 2 - 10);
+    const ch = getHeight(cx, cz);
+    if (ch < WATER_Y + 0.45 || ch > 7.5) continue;
+    clumpCol.setHSL(rand(0.22, 0.32), rand(0.45, 0.7), rand(0.32, 0.5));
+    for (let b = 0; b < PER_CLUMP && placed < COUNT; b++) {
+      const x = cx + rand(-1.3, 1.3) * Math.random(), z = cz + rand(-1.3, 1.3) * Math.random();
+      const h = getHeight(x, z);
+      if (h < WATER_Y + 0.4 || h > 7.5) continue;
+      p.set(x, h - 0.04, z);
+      q.setFromAxisAngle(yAxis, rand(0, Math.PI * 2));
+      const sc = rand(0.6, 1.3);
+      s.set(sc * rand(0.8, 1.2), sc * rand(0.85, 1.6), sc);
+      m.compose(p, q, s);
+      grass.setMatrixAt(placed, m);
+      col.copy(clumpCol).offsetHSL(rand(-0.02, 0.02), 0, rand(-0.06, 0.06));
+      grass.setColorAt(placed, col);
+      placed++;
+    }
   }
   grass.count = placed;
   grass.instanceMatrix.needsUpdate = true;
@@ -420,31 +490,42 @@ const grassUniform = { value: 0 };
   scene.add(grass);
 }
 
-// ---------------- 花 ----------------
+// ---------------- 花(茎 + 花頭、風に揺れる) ----------------
 {
-  const geo = new THREE.PlaneGeometry(0.22, 0.22);
-  geo.translate(0, 0.12, 0);
-  const mat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, vertexColors: false, color: 0xffffff });
-  const COUNT = 700;
-  const flowers = new THREE.InstancedMesh(geo, mat, COUNT);
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(1, 1, 1);
+  const COUNT = 800;
+  const stemGeo = new THREE.CylinderGeometry(0.015, 0.028, 0.42, 4);
+  stemGeo.translate(0, 0.21, 0);
+  const headGeo = new THREE.SphereGeometry(0.07, 6, 5);
+  headGeo.scale(1, 0.75, 1);
+  headGeo.translate(0, 0.44, 0);
+  const stemMat = new THREE.MeshLambertMaterial({ color: 0x3f6e35 });
+  const headMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  addWind(stemMat, 0.6);
+  addWind(headMat, 0.6);
+  const stems = new THREE.InstancedMesh(stemGeo, stemMat, COUNT);
+  const heads = new THREE.InstancedMesh(headGeo, headMat, COUNT);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
+  const yAxis = new THREE.Vector3(0, 1, 0);
   const col = new THREE.Color();
-  const palette = [0xffffff, 0xe8d9ff, 0xc79bf2, 0xfff3b8, 0xa9d8ff];
+  const palette = [0xffffff, 0xe8d9ff, 0xc79bf2, 0xfff3b8, 0xa9d8ff, 0xffc9d8];
   let placed = 0, guard = 0;
   while (placed < COUNT && guard++ < COUNT * 12) {
     const x = rand(-WORLD / 2 + 12, WORLD / 2 - 12), z = rand(-WORLD / 2 + 12, WORLD / 2 - 12);
     const h = getHeight(x, z);
     if (h < WATER_Y + 0.5 || h > 6.5) continue;
-    p.set(x, h, z);
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rand(0, Math.PI));
+    p.set(x, h - 0.02, z);
+    q.setFromAxisAngle(yAxis, rand(0, Math.PI * 2));
+    const sc = rand(0.7, 1.4);
+    s.set(sc, sc, sc);
     m.compose(p, q, s);
-    flowers.setMatrixAt(placed, m);
+    stems.setMatrixAt(placed, m);
+    heads.setMatrixAt(placed, m);
     col.set(palette[(Math.random() * palette.length) | 0]);
-    flowers.setColorAt(placed, col);
+    heads.setColorAt(placed, col);
     placed++;
   }
-  flowers.count = placed;
-  scene.add(flowers);
+  stems.count = heads.count = placed;
+  scene.add(stems, heads);
 }
 
 // ---------------- 石材マテリアル ----------------
@@ -514,28 +595,85 @@ function makeTemple() {
   g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return g;
 }
+// ---------------- 樹木(しなる幹 + 枝分かれ + 有機的な葉群) ----------------
+function makeBarkTexture() {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#6b513a'; g.fillRect(0, 0, 64, 128);
+  for (let i = 0; i < 160; i++) {
+    g.strokeStyle = `rgba(${30 + Math.random() * 50 | 0},${20 + Math.random() * 35 | 0},${10 + Math.random() * 25 | 0},${rand(0.25, 0.6)})`;
+    g.lineWidth = rand(1, 3);
+    const x = rand(0, 64);
+    g.beginPath(); g.moveTo(x, rand(-10, 30)); g.lineTo(x + rand(-6, 6), rand(60, 140)); g.stroke();
+  }
+  for (let i = 0; i < 40; i++) {
+    g.fillStyle = `rgba(150,122,90,${rand(0.1, 0.3)})`;
+    g.fillRect(rand(0, 60), rand(0, 124), rand(2, 6), rand(3, 9));
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const barkMat = new THREE.MeshStandardMaterial({ map: makeBarkTexture(), color: 0xb59a7d, roughness: 1 });
+const foliageMats = [0x3e7a2f, 0x4f8c33, 0x5fa23f, 0x2f6b34].map(c => {
+  const m = new THREE.MeshLambertMaterial({ color: c, flatShading: true });
+  addWind(m, 0.3);
+  return m;
+});
+const foliageGeos = [makeClumpGeo(1, 1, 0.45, 0.78), makeClumpGeo(1, 1, 0.6, 0.85), makeClumpGeo(1.2, 1, 0.5, 0.7)];
 function makeTree(x, z) {
   const g = new THREE.Group();
-  const h = rand(6, 11);
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.5, h, 7),
-    new THREE.MeshStandardMaterial({ color: 0x5d4630, roughness: 1 }));
+  const h = rand(5.5, 10.5);
+  const lean = rand(-0.7, 0.7);
+  const trunkGeo = new THREE.CylinderGeometry(0.2, rand(0.45, 0.65), h, 8, 6);
+  { // 幹をしならせ、根元を張り出させる
+    const p = trunkGeo.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const t = (p.getY(i) + h / 2) / h;
+      const flare = 1 + Math.max(0, 0.12 - t) * 6;
+      p.setX(i, p.getX(i) * flare + t * t * lean);
+      p.setZ(i, p.getZ(i) * flare + t * t * lean * 0.5);
+    }
+    trunkGeo.computeVertexNormals();
+  }
+  const trunk = new THREE.Mesh(trunkGeo, barkMat);
   trunk.position.y = h / 2; g.add(trunk);
-  const leafMat = new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(rand(0.26, 0.33), 0.5, rand(0.28, 0.38)) });
-  for (let i = 0; i < 3; i++) {
-    const r = rand(1.8, 3.2);
-    const leaf = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 6), leafMat);
-    leaf.scale.y = 0.75;
-    leaf.position.set(rand(-1.2, 1.2), h - i * 1.4 + rand(0, 1), rand(-1.2, 1.2));
+  const mat = foliageMats[(Math.random() * foliageMats.length) | 0];
+  // 枝(先端に葉群を載せる)
+  const branches = 2 + (Math.random() * 2 | 0);
+  for (let i = 0; i < branches; i++) {
+    const bl = rand(1.4, 2.6);
+    const bg = new THREE.CylinderGeometry(0.05, 0.11, bl, 5);
+    bg.translate(0, bl / 2, 0);
+    const br = new THREE.Mesh(bg, barkMat);
+    br.position.set(lean * 0.5, h * rand(0.55, 0.85), lean * 0.25);
+    br.rotation.set(0, rand(0, Math.PI * 2), rand(0.7, 1.2));
+    const leaf = new THREE.Mesh(foliageGeos[(Math.random() * 3) | 0], mat);
+    leaf.scale.setScalar(rand(0.9, 1.5));
+    leaf.position.y = bl + 0.2;
+    br.add(leaf);
+    g.add(br);
+  }
+  // 樹冠
+  const crown = 3 + (Math.random() * 2 | 0);
+  for (let i = 0; i < crown; i++) {
+    const leaf = new THREE.Mesh(foliageGeos[(Math.random() * 3) | 0], mat);
+    leaf.scale.setScalar(rand(1.4, 2.4));
+    leaf.position.set(lean + rand(-1.3, 1.3), h - rand(0, 1.6), rand(-1.3, 1.3));
+    leaf.rotation.y = rand(0, Math.PI * 2);
     g.add(leaf);
   }
   g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return placeOnGround(g, x, z, 0.4);
 }
+const glowBushMat = new THREE.MeshLambertMaterial({ color: 0x1d4a35, flatShading: true });
+addWind(glowBushMat, 0.2);
 function makeGlowBush(x, z, hue = 0.5) {
   const g = new THREE.Group();
-  const bush = new THREE.Mesh(new THREE.SphereGeometry(rand(0.8, 1.4), 7, 5),
-    new THREE.MeshLambertMaterial({ color: 0x1d4a35 }));
-  bush.scale.y = 0.6; bush.castShadow = true;
+  const bush = new THREE.Mesh(makeClumpGeo(rand(0.8, 1.4), 1, 0.55, 0.6), glowBushMat);
+  bush.rotation.y = rand(0, Math.PI * 2);
+  bush.castShadow = true;
   g.add(bush);
   const n = 6 + (Math.random() * 5 | 0);
   for (let i = 0; i < n; i++) {
@@ -576,11 +714,90 @@ for (let i = 0; i < 16; i++) {
   placeOnGround(makePillar(), x, z, 0.3);
   addCollider(x, z, 0.9);
 }
-for (let i = 0; i < 42; i++) {
-  const x = rand(-145, 145), z = rand(-145, 145);
-  if (riverDist(x, z) < 11 || Math.hypot(x, z) < 12 || getHeight(x, z) > 7) continue;
-  makeTree(x, z);
-  addCollider(x, z, 0.7);
+{ // 木立(grove)を作って自然な群生にする
+  const groves = [];
+  for (let i = 0; i < 7; i++) groves.push([rand(-120, 120), rand(-120, 120)]);
+  for (let i = 0; i < 64; i++) {
+    let x, z;
+    if (i % 2 === 0) {
+      const gv = groves[(i / 2 | 0) % groves.length];
+      x = gv[0] + rand(-18, 18); z = gv[1] + rand(-18, 18);
+    } else {
+      x = rand(-145, 145); z = rand(-145, 145);
+    }
+    if (riverDist(x, z) < 11 || Math.hypot(x, z) < 12 || getHeight(x, z) > 7) continue;
+    makeTree(x, z);
+    addCollider(x, z, 0.7);
+  }
+}
+// ---------------- 茂み & シダ ----------------
+{
+  const bushMat = new THREE.MeshLambertMaterial({ flatShading: true });
+  addWind(bushMat, 0.25);
+  const bushGeo = makeClumpGeo(1, 1, 0.55, 0.62);
+  const BUSHES = 150;
+  const bushes = new THREE.InstancedMesh(bushGeo, bushMat, BUSHES);
+  bushes.castShadow = true; bushes.receiveShadow = true;
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
+  const yAxis = new THREE.Vector3(0, 1, 0), col = new THREE.Color();
+  let placed = 0, guard = 0;
+  while (placed < BUSHES && guard++ < BUSHES * 12) {
+    const x = rand(-140, 140), z = rand(-140, 140);
+    const h = getHeight(x, z);
+    if (h < WATER_Y + 0.35 || h > 7 || Math.hypot(x, z) < 8) continue;
+    const sc = rand(0.5, 1.8);
+    p.set(x, h + sc * 0.2, z);
+    q.setFromAxisAngle(yAxis, rand(0, Math.PI * 2));
+    s.set(sc * rand(0.85, 1.2), sc, sc * rand(0.85, 1.2));
+    m.compose(p, q, s);
+    bushes.setMatrixAt(placed, m);
+    col.setHSL(rand(0.26, 0.34), rand(0.4, 0.6), rand(0.18, 0.3));
+    bushes.setColorAt(placed, col);
+    placed++;
+  }
+  bushes.count = placed;
+  scene.add(bushes);
+
+  // シダ(しなった葉を放射状にマージ)
+  const fronds = [];
+  for (let i = 0; i < 7; i++) {
+    const f = new THREE.PlaneGeometry(0.3, 1.35, 1, 4);
+    f.translate(0, 0.675, 0);
+    const fp = f.attributes.position;
+    for (let j = 0; j < fp.count; j++) {
+      const y = fp.getY(j);
+      fp.setX(j, fp.getX(j) * (1 - y * 0.5));
+      fp.setZ(j, y * y * 0.5);
+    }
+    f.rotateX(0.55 + (i % 3) * 0.18);
+    f.rotateY((i / 7) * Math.PI * 2);
+    fronds.push(f);
+  }
+  const fernGeo = mergeGeometries(fronds);
+  fernGeo.computeVertexNormals();
+  const fernMat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  addWind(fernMat, 0.6);
+  const FERNS = 260;
+  const ferns = new THREE.InstancedMesh(fernGeo, fernMat, FERNS);
+  ferns.receiveShadow = true;
+  placed = 0; guard = 0;
+  while (placed < FERNS && guard++ < FERNS * 12) {
+    const x = rand(-140, 140), z = rand(-140, 140);
+    const h = getHeight(x, z);
+    if (h < WATER_Y + 0.3 || h > 6.5) continue;
+    if (riverDist(x, z) > 22 && Math.random() < 0.55) continue;  // 川辺・湿地に多めに
+    p.set(x, h - 0.03, z);
+    q.setFromAxisAngle(yAxis, rand(0, Math.PI * 2));
+    const sc = rand(0.6, 1.5);
+    s.set(sc, sc * rand(0.8, 1.2), sc);
+    m.compose(p, q, s);
+    ferns.setMatrixAt(placed, m);
+    col.setHSL(rand(0.3, 0.37), rand(0.45, 0.6), rand(0.2, 0.33));
+    ferns.setColorAt(placed, col);
+    placed++;
+  }
+  ferns.count = placed;
+  scene.add(ferns);
 }
 for (let i = 0; i < 26; i++) {
   const x = rand(-120, 120), z = rand(-120, 120);
