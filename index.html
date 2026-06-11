@@ -1439,8 +1439,10 @@ const SFX_FILES = {
   // プレイヤー男性ボイス
   voiceAttack1: 'voice-attack1.mp3', // 攻撃の掛け声1「えい!」等
   voiceAttack2: 'voice-attack2.mp3', // 攻撃の掛け声2「やあ!」等
+  voiceAttack3: 'voice-attack3.mp3', // 攻撃の掛け声3(あれば3種ランダム)
   voiceSpin: 'voice-spin.mp3',       // 回転斬り「とりゃー!」等
   voiceCast: 'voice-cast.mp3',       // 魔法発動の掛け声
+  voiceShield: 'voice-shield.mp3',   // バリア発動の一言
   voiceHurt: 'voice-hurt.mp3',       // 被弾「ぐっ!」等
   voiceDie: 'voice-die.mp3',         // 断末魔
   voiceDash: 'voice-dash.mp3',       // ダッシュの掛け声
@@ -1646,7 +1648,10 @@ function trySkill(name) {
       player.attackDir *= -1;
       cooldowns.sword = cdMax.sword;
       sfx.slash();
-      voice(player.attackDir > 0 ? 'voiceAttack1' : 'voiceAttack2');
+      { // 攻撃ボイスは読み込めている中からランダム
+        const av = ['voiceAttack1', 'voiceAttack2', 'voiceAttack3'].filter(k => sfxBuffers[k]);
+        if (av.length) voice(av[(Math.random() * av.length) | 0]);
+      }
       meleeHit(2.9, Math.PI * 0.85, 34);
       break;
     case 'claw':
@@ -1684,6 +1689,7 @@ function trySkill(name) {
       cooldowns.shield = cdMax.shield;
       player.shieldT = 6;
       sfx.shield();
+      voice('voiceShield');
       break;
     case 'fire': {
       if (player.mp < 18) return;
