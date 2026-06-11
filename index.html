@@ -120,6 +120,7 @@
 <div id="vignette"></div>
 <div id="hurt"></div>
 <div id="floaters"></div>
+<audio id="bgm" src="assets/bgm.mp3" loop preload="auto"></audio>
 
 <div id="minimapWrap">
   <canvas id="minimap" width="340" height="340"></canvas>
@@ -179,7 +180,7 @@
   <div class="controls">
     <kbd>W A S D</kbd> 移動　<kbd>マウス</kbd> 視点　<kbd>Shift</kbd> 歩く<br>
     <kbd>左クリック</kbd> 剣攻撃　<kbd>右クリック長押し</kbd> 魔法ビーム　<kbd>Space</kbd> ダッシュ<br>
-    <kbd>2</kbd> ファイアボール　<kbd>3</kbd> 回転斬り　<kbd>4</kbd> 回復　<kbd>5</kbd> バリア　<kbd>Esc</kbd> マウス解放(ボタン操作)
+    <kbd>2</kbd> ファイアボール　<kbd>3</kbd> 回転斬り　<kbd>4</kbd> 回復　<kbd>5</kbd> バリア　<kbd>M</kbd> BGM　<kbd>Esc</kbd> マウス解放(ボタン操作)
   </div>
 </div>
 <div id="gameover"><h2>YOU DIED</h2><div id="goScore" style="color:#e8c9b8"></div><button id="goRetry">もう一度挑戦する</button></div>
@@ -820,6 +821,151 @@ for (let i = 0; i < 26; i++) {
   }
 }
 
+// ---------------- 小物ディテール(小石・倒木・睡蓮・石畳・壊れた壁) ----------------
+{
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
+  const e1 = new THREE.Euler(), col = new THREE.Color();
+
+  // 小石
+  const PEBBLES = 420;
+  const pebbles = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0),
+    new THREE.MeshStandardMaterial({ roughness: 0.95, flatShading: true }), PEBBLES);
+  pebbles.receiveShadow = true;
+  let placed = 0, guard = 0;
+  while (placed < PEBBLES && guard++ < PEBBLES * 10) {
+    const x = rand(-145, 145), z = rand(-145, 145);
+    const h = getHeight(x, z);
+    if (h > 7.5) continue;
+    const sc = rand(0.05, 0.22);
+    p.set(x, Math.max(h, WATER_Y - 0.2) + sc * 0.3, z);
+    e1.set(rand(0, 3), rand(0, 3), rand(0, 3));
+    q.setFromEuler(e1);
+    s.set(sc * rand(0.8, 1.4), sc * rand(0.5, 0.8), sc);
+    m.compose(p, q, s);
+    pebbles.setMatrixAt(placed, m);
+    const g2 = rand(0.45, 0.62);
+    col.setRGB(g2 * rand(0.95, 1.1), g2, g2 * rand(0.85, 1));
+    pebbles.setColorAt(placed, col);
+    placed++;
+  }
+  pebbles.count = placed;
+  scene.add(pebbles);
+
+  // 倒木(苔つき・枝の切り株つき)
+  for (let i = 0; i < 10; i++) {
+    const x = rand(-130, 130), z = rand(-130, 130);
+    if (Math.hypot(x, z) < 12 || riverDist(x, z) < 9) continue;
+    const len = rand(2.6, 4.6), r = rand(0.22, 0.38);
+    const log = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.85, r, len, 8), barkMat);
+    body.rotation.z = Math.PI / 2;
+    log.add(body);
+    const moss = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.55, r * 0.6, len * 0.75, 7), mossMat);
+    moss.rotation.z = Math.PI / 2;
+    moss.position.y = r * 0.55;
+    log.add(moss);
+    const stub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.5, 5), barkMat);
+    stub.position.set(rand(-len / 3, len / 3), r * 0.7, rand(-0.1, 0.1));
+    stub.rotation.z = rand(-0.5, 0.5);
+    log.add(stub);
+    log.rotation.y = rand(0, Math.PI * 2);
+    log.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    placeOnGround(log, x, z, -r * 0.6);
+    addCollider(x, z, 0.8);
+  }
+
+  // 睡蓮の葉(深場の水面)
+  const LILY = 70;
+  const lilyGeo = new THREE.CircleGeometry(0.4, 9, 0.4, Math.PI * 1.8);
+  lilyGeo.rotateX(-Math.PI / 2);
+  const lilies = new THREE.InstancedMesh(lilyGeo,
+    new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), LILY);
+  placed = 0; guard = 0;
+  while (placed < LILY && guard++ < LILY * 30) {
+    const x = rand(-150, 150), z = rand(-150, 150);
+    if (getHeight(x, z) > WATER_Y - 0.5) continue;
+    p.set(x, WATER_Y + 0.13, z);
+    e1.set(0, rand(0, Math.PI * 2), 0);
+    q.setFromEuler(e1);
+    const sc = rand(0.6, 1.6);
+    s.set(sc, 1, sc);
+    m.compose(p, q, s);
+    lilies.setMatrixAt(placed, m);
+    col.setHSL(rand(0.3, 0.36), rand(0.4, 0.55), rand(0.25, 0.38));
+    lilies.setColorAt(placed, col);
+    placed++;
+  }
+  lilies.count = placed;
+  scene.add(lilies);
+
+  // 石畳の道(スタート地点 → 神殿へのベジェ曲線)
+  const STONES = 46;
+  const pathStones = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1.05, 0.14, 7),
+    new THREE.MeshStandardMaterial({ roughness: 0.9, flatShading: true }), STONES);
+  pathStones.receiveShadow = true;
+  const pStart = new THREE.Vector2(4, 14), pMid = new THREE.Vector2(-30, -10), pEnd = new THREE.Vector2(-32, -44);
+  for (let i = 0; i < STONES; i++) {
+    const tt = i / (STONES - 1);
+    const a1 = pStart.clone().lerp(pMid, tt), a2 = pMid.clone().lerp(pEnd, tt);
+    const pt = a1.lerp(a2, tt);
+    const x = pt.x + rand(-0.8, 0.8), z = pt.y + rand(-0.8, 0.8);
+    p.set(x, getHeight(x, z) + 0.02, z);
+    e1.set(0, rand(0, Math.PI), 0);
+    q.setFromEuler(e1);
+    const sc = rand(0.45, 0.75);
+    s.set(sc, 1, sc * rand(0.8, 1.2));
+    m.compose(p, q, s);
+    pathStones.setMatrixAt(i, m);
+    col.setHSL(0.1, rand(0.05, 0.12), rand(0.55, 0.7));
+    pathStones.setColorAt(i, col);
+  }
+  scene.add(pathStones);
+
+  // 壊れた壁(欠けたブロックと苔)
+  for (let i = 0; i < 8; i++) {
+    const x = rand(-120, 120), z = rand(-120, 120);
+    if (riverDist(x, z) < 11 || Math.hypot(x, z) < 14) continue;
+    const wall = new THREE.Group();
+    const w = rand(3, 6), hgt = rand(1.2, 2.8);
+    const base2 = new THREE.Mesh(new THREE.BoxGeometry(w, hgt, 0.7), stoneMat);
+    base2.position.y = hgt / 2;
+    wall.add(base2);
+    for (let j = 0; j < 4; j++) {
+      const blk = new THREE.Mesh(new THREE.BoxGeometry(rand(0.5, 1.1), rand(0.3, 0.7), 0.72), stoneDark);
+      blk.position.set(rand(-w / 2, w / 2), hgt + 0.2, 0);
+      blk.rotation.z = rand(-0.15, 0.15);
+      wall.add(blk);
+    }
+    const moss2 = new THREE.Mesh(new THREE.BoxGeometry(w * 0.7, hgt * 0.4, 0.74), mossMat);
+    moss2.position.y = hgt * 0.25;
+    wall.add(moss2);
+    wall.rotation.y = rand(0, Math.PI);
+    wall.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+    placeOnGround(wall, x, z, 0.3);
+    addCollider(x, z, Math.max(1.2, w * 0.35));
+  }
+}
+
+// ---------------- 蝶 ----------------
+const butterflies = [];
+{
+  const wingGeo = new THREE.PlaneGeometry(0.16, 0.12);
+  wingGeo.translate(0.08, 0, 0);
+  const wingColors = [0xffd9f2, 0xfff3b8, 0xc9e8ff, 0xe8c9ff, 0xffffff];
+  for (let i = 0; i < 22; i++) {
+    const g2 = new THREE.Group();
+    const matW = new THREE.MeshBasicMaterial({ color: wingColors[i % wingColors.length], side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+    const wl = new THREE.Mesh(wingGeo, matW);
+    const wr = new THREE.Mesh(wingGeo, matW);
+    wr.rotation.y = Math.PI;
+    g2.add(wl, wr);
+    const x = rand(-120, 120), z = rand(-120, 120);
+    g2.position.set(x, Math.max(getHeight(x, z), WATER_Y) + rand(0.8, 2), z);
+    butterflies.push({ g: g2, wl, wr, base: g2.position.clone(), ph: rand(0, 7), r: rand(1.5, 5), sp: rand(0.3, 0.8) });
+    scene.add(g2);
+  }
+}
+
 // ---------------- 浮遊島 ----------------
 const islands = [];
 for (let i = 0; i < 6; i++) {
@@ -904,69 +1050,150 @@ const crystals = [];
 // ============================================================
 function makeCharacter() {
   const g = new THREE.Group();
-  const mat = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
-  const shirt = mat(0xe3dccb), pants = mat(0x3d566e), skin = mat(0xeab890),
-        hair = mat(0xc05a26), leather = mat(0x8a5a2e), scarfM = mat(0x9aa0a8), boot = mat(0x4c3a26);
+  const mat = (c, r = 0.85) => new THREE.MeshStandardMaterial({ color: c, roughness: r });
+  const shirt = mat(0xe3dccb), shirtDark = mat(0xcfc7b4), pants = mat(0x3d566e), skin = mat(0xeab890),
+        hair = mat(0xc05a26, 0.95), leather = mat(0x8a5a2e), leatherDark = mat(0x6e4622),
+        scarfM = mat(0x9aa0a8, 1), boot = mat(0x4c3a26),
+        metal = new THREE.MeshStandardMaterial({ color: 0xcfd8e2, roughness: 0.3, metalness: 0.8 });
 
   const hips = new THREE.Group(); hips.position.y = 0.92; g.add(hips);
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.58, 0.32), shirt);
-  torso.position.y = 0.32; hips.add(torso);
-  const scarf = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.16, 0.38), scarfM);
-  scarf.position.y = 0.62; hips.add(scarf);
-  const scarfTail = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.5, 0.06), scarfM);
-  scarfTail.position.set(0.08, 0.36, -0.22); scarfTail.rotation.x = 0.18; hips.add(scarfTail);
-  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.44, 0.22), leather);
-  pack.position.set(0, 0.3, -0.3); hips.add(pack);
-  const strap = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.1, 0.36), mat(0x6e4622));
-  strap.position.y = 0.5; hips.add(strap);
 
-  const head = new THREE.Group(); head.position.y = 0.82; hips.add(head);
-  const face = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), skin); head.add(face);
-  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.235, 12, 10), hair);
-  hairM.position.set(0, 0.05, -0.03); hairM.scale.set(1, 0.92, 1); head.add(hairM);
-  const fringe = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.1, 0.1), hair);
-  fringe.position.set(0, 0.13, 0.16); head.add(fringe);
+  // 骨盤・ベルト・バックル・ポーチ
+  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.2, 0.27), pants);
+  pelvis.position.y = 0.04; hips.add(pelvis);
+  const belt = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.09, 0.3), leatherDark);
+  belt.position.y = 0.15; hips.add(belt);
+  const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.07, 0.02), metal);
+  buckle.position.set(0, 0.15, 0.16); hips.add(buckle);
+  const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.15, 0.09), leather);
+  pouch.position.set(-0.22, 0.04, 0.1); pouch.rotation.z = 0.1; hips.add(pouch);
 
+  // 胴体(シャツ + 胸当て + 斜めストラップ + 肩当て)
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.34, 0.3), shirt);
+  torso.position.y = 0.33; hips.add(torso);
+  const chest = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.3, 0.33), shirtDark);
+  chest.position.y = 0.6; hips.add(chest);
+  const strap = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.62, 0.36), leatherDark);
+  strap.rotation.z = 0.62;
+  strap.position.set(0.02, 0.48, 0); hips.add(strap);
+  const padL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.24), leather);
+  padL.position.set(-0.32, 0.76, 0); padL.rotation.z = 0.25; hips.add(padL);
+  const padR = padL.clone(); padR.position.x = 0.32; padR.rotation.z = -0.25; hips.add(padR);
+
+  // スカーフ(二段 + なびくテール2本)
+  const scarf = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.13, 0.4), scarfM);
+  scarf.position.y = 0.8; scarf.rotation.y = 0.08; hips.add(scarf);
+  const scarf2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.11, 0.36), scarfM);
+  scarf2.position.y = 0.89; scarf2.rotation.y = -0.12; hips.add(scarf2);
+  const scarfTail = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.52, 0.05), scarfM);
+  scarfTail.position.set(0.1, 0.55, -0.26); scarfTail.rotation.x = 0.3; hips.add(scarfTail);
+  const scarfTail2 = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.4, 0.05), scarfM);
+  scarfTail2.position.set(-0.06, 0.6, -0.28); scarfTail2.rotation.set(0.45, 0, -0.15); hips.add(scarfTail2);
+
+  // バックパック(本体 + 蓋 + 寝袋 + フラスコ + ベルト)
+  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.2), leather);
+  pack.position.set(0, 0.45, -0.33); hips.add(pack);
+  const packLid = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.14, 0.22), leatherDark);
+  packLid.position.set(0, 0.66, -0.33); hips.add(packLid);
+  const bedroll = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.46, 8), mat(0x7d8c96, 1));
+  bedroll.rotation.z = Math.PI / 2;
+  bedroll.position.set(0, 0.79, -0.33); hips.add(bedroll);
+  const flask = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.16, 7), mat(0xa8763e, 0.5));
+  flask.position.set(0.24, 0.33, -0.31); hips.add(flask);
+  for (const sx of [-0.1, 0.1]) {
+    const pb = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.45, 0.23), leatherDark);
+    pb.position.set(sx, 0.45, -0.33); hips.add(pb);
+  }
+
+  // 頭(顔 + 目 + 眉 + 髪 + 前髪 + 逆立った房 + もみあげ)
+  const head = new THREE.Group(); head.position.y = 1.06; hips.add(head);
+  const face = new THREE.Mesh(new THREE.SphereGeometry(0.21, 14, 12), skin); head.add(face);
+  for (const sx of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.025, 6, 6), mat(0x2a2420, 0.4));
+    eye.position.set(0.075 * sx, 0.02, 0.19); head.add(eye);
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.018, 0.02), hair);
+    brow.position.set(0.075 * sx, 0.085, 0.19); brow.rotation.z = -0.15 * sx; head.add(brow);
+    const sb = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.14, 0.07), hair);
+    sb.position.set(0.2 * sx, -0.04, 0.02); head.add(sb);
+  }
+  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.235, 14, 12), hair);
+  hairM.position.set(0, 0.055, -0.03); hairM.scale.set(1, 0.95, 1); head.add(hairM);
+  const fringe = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.09, 0.1), hair);
+  fringe.position.set(0, 0.15, 0.16); fringe.rotation.x = 0.25; head.add(fringe);
+  const tufts = [[0, 0.26, -0.02, 0.3], [0.12, 0.22, -0.1, 0.55], [-0.13, 0.23, -0.06, -0.5], [0.02, 0.2, -0.2, 1.0], [-0.05, 0.24, 0.1, -0.2]];
+  for (const [tx, ty, tz, rz] of tufts) {
+    const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.18, 5), hair);
+    tuft.position.set(tx, ty, tz);
+    tuft.rotation.set(tz * -2.2, 0, rz);
+    head.add(tuft);
+  }
+
+  // 腕(上腕 + 肘から先のグループ + 籠手 + 手)
   function arm(side) {
     const a = new THREE.Group();
-    a.position.set(0.33 * side, 0.55, 0);
-    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.52, 0.15), shirt);
-    upper.position.y = -0.24; a.add(upper);
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.14, 0.13), skin);
-    hand.position.y = -0.55; a.add(hand);
-    const tip = new THREE.Object3D(); tip.position.y = -0.62; a.add(tip);
+    a.position.set(0.33 * side, 0.72, 0);
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.32, 0.15), shirt);
+    upper.position.y = -0.16; a.add(upper);
+    const elbow = new THREE.Group(); elbow.position.y = -0.32; a.add(elbow);
+    const fore = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.26, 0.13), shirtDark);
+    fore.position.y = -0.11; elbow.add(fore);
+    const bracer = new THREE.Mesh(new THREE.BoxGeometry(0.155, 0.16, 0.155), leather);
+    bracer.position.y = -0.17; elbow.add(bracer);
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.13, 0.12), skin);
+    hand.position.y = -0.31; elbow.add(hand);
+    const tip = new THREE.Object3D(); tip.position.y = -0.38; elbow.add(tip);
     hips.add(a);
-    return { g: a, tip };
+    return { g: a, tip, elbow };
   }
   const armL = arm(-1), armR = arm(1);
 
-  // 剣(右手)
+  // 剣(刀身 + 樋 + 切先 + 鍔 + 柄 + 柄頭)・腰の鞘
   const sword = new THREE.Group();
-  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.95, 0.14),
-    new THREE.MeshStandardMaterial({ color: 0xcfd8e2, roughness: 0.25, metalness: 0.85, emissive: 0x335566, emissiveIntensity: 0.25 }));
-  blade.position.y = 0.62; sword.add(blade);
-  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.05, 0.22), mat(0x806020));
-  guard.position.y = 0.12; sword.add(guard);
-  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.2, 6), mat(0x442e18));
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.85, 0.13), metal);
+  blade.position.y = 0.58; sword.add(blade);
+  const fuller = new THREE.Mesh(new THREE.BoxGeometry(0.054, 0.7, 0.03),
+    new THREE.MeshStandardMaterial({ color: 0x8fa8b8, roughness: 0.4, metalness: 0.7 }));
+  fuller.position.y = 0.52; sword.add(fuller);
+  const bladeTip = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.18, 4), metal);
+  bladeTip.position.y = 1.09; bladeTip.rotation.y = Math.PI / 4; bladeTip.scale.set(0.55, 1, 1.4); sword.add(bladeTip);
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.26), mat(0x8a6a20, 0.4));
+  guard.position.y = 0.14; sword.add(guard);
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.2, 6), leatherDark);
   sword.add(grip);
-  sword.position.y = -0.58;
+  const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 6), metal);
+  pommel.position.y = -0.12; sword.add(pommel);
+  sword.position.y = -0.31;
   sword.rotation.x = Math.PI / 2;  // 前向きに構える
-  armR.g.add(sword);
+  armR.elbow.add(sword);
+  const sheath = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.8, 0.16), leatherDark);
+  sheath.position.set(-0.2, -0.1, -0.12);
+  sheath.rotation.set(-0.15, 0, 0.25);
+  hips.add(sheath);
 
+  // 脚(腿 + 膝から下のグループ + ブーツカフ + ブーツ + 靴底)
   function leg(side) {
     const l = new THREE.Group();
     l.position.set(0.14 * side, 0.04, 0);
-    const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.56, 0.2), pants);
-    thigh.position.y = -0.28; l.add(thigh);
-    const bootM = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.22, 0.27), boot);
-    bootM.position.set(0, -0.62, 0.03); l.add(bootM);
+    const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.42, 0.2), pants);
+    thigh.position.y = -0.22; l.add(thigh);
+    const knee = new THREE.Group(); knee.position.y = -0.45; l.add(knee);
+    const shin = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.3, 0.18), pants);
+    shin.position.y = -0.14; knee.add(shin);
+    const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.23), leather);
+    cuff.position.y = -0.31; knee.add(cuff);
+    const bootM = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.17, 0.3), boot);
+    bootM.position.set(0, -0.42, 0.04); knee.add(bootM);
+    const sole = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.05, 0.32), mat(0x33271a, 1));
+    sole.position.set(0, -0.49, 0.04); knee.add(sole);
     hips.add(l);
-    return l;
+    return { g: l, knee };
   }
-  const legL = leg(-1), legR = leg(1);
+  const lL = leg(-1), lR = leg(1);
 
   g.traverse(o => { if (o.isMesh) o.castShadow = true; });
-  return { g, hips, head, armL, armR, legL, legR, sword };
+  return { g, hips, head, armL, armR,
+           legL: lL.g, legR: lR.g, kneeL: lL.knee, kneeR: lR.knee,
+           elbowL: armL.elbow, elbowR: armR.elbow, sword };
 }
 
 const playerModel = makeCharacter();
@@ -1053,20 +1280,63 @@ function makeEnemyModel() {
   }
   return { g, core, eye, rocks };
 }
-function spawnEnemy(x, z) {
-  const model = makeEnemyModel();
+// ウィスプ(クラゲ型の魔導射手): 距離を保ちながら魔弾を放つ
+function makeWispModel() {
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 10),
+    new THREE.MeshStandardMaterial({ color: 0x9a6fe8, emissive: 0xb07fff, emissiveIntensity: 1.3, roughness: 0.3 }));
+  core.position.y = 2.1; core.castShadow = true; g.add(core);
+  const hood = new THREE.Mesh(new THREE.ConeGeometry(0.66, 0.85, 9, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0x46307a, emissive: 0x6a4fd8, emissiveIntensity: 0.45, roughness: 0.6, side: THREE.DoubleSide, flatShading: true }));
+  hood.position.y = 2.5; g.add(hood);
+  const eye = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xe2ccff, transparent: true, depthWrite: false }));
+  eye.scale.set(1.5, 1.5, 1); eye.position.y = 2.1; g.add(eye);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.035, 6, 22),
+    new THREE.MeshStandardMaterial({ color: 0x8a6fd8, emissive: 0x9a7fff, emissiveIntensity: 0.8, roughness: 0.4 }));
+  ring.rotation.x = Math.PI / 2; ring.position.y = 1.9; g.add(ring);
+  const tentacles = [];
+  const tentMat = new THREE.MeshStandardMaterial({ color: 0x5a3fa8, emissive: 0x7a5fd8, emissiveIntensity: 0.5, roughness: 0.7 });
+  for (let i = 0; i < 6; i++) {
+    const hh = rand(0.6, 0.9);
+    const tg = new THREE.ConeGeometry(0.05, hh, 5);
+    tg.rotateX(Math.PI);
+    tg.translate(0, -hh / 2, 0);
+    const tn = new THREE.Mesh(tg, tentMat);
+    const a = (i / 6) * Math.PI * 2;
+    tn.position.set(Math.cos(a) * 0.42, 1.8, Math.sin(a) * 0.42);
+    tentacles.push(tn); g.add(tn);
+  }
+  return { g, core, eye, hood, ring, tentacles, rocks: [] };
+}
+function spawnEnemy(x, z, type = (Math.random() < 0.4 ? 'wisp' : 'golem')) {
+  const model = type === 'wisp' ? makeWispModel() : makeEnemyModel();
   model.g.position.set(x, getHeight(x, z), z);
   scene.add(model.g);
   const bar = document.createElement('div');
   bar.className = 'ebar'; bar.innerHTML = '<div></div>';
   floaters.appendChild(bar);
+  const hp = type === 'wisp' ? 60 : 100;
   enemies.push({
-    model, bar, barFill: bar.firstChild,
-    pos: model.g.position, hp: 100, maxHp: 100,
+    type, model, bar, barFill: bar.firstChild,
+    pos: model.g.position, hp, maxHp: hp,
+    aimY: type === 'wisp' ? 2.1 : 1.4,
+    barY: type === 'wisp' ? 3.4 : 2.9,
     state: 'wander', target: new THREE.Vector3(x, 0, z),
-    windup: 0, hitFlash: 0, ph: rand(0, 7),
+    windup: 0, shootT: rand(1, 2.5), hitFlash: 0, ph: rand(0, 7),
     home: new THREE.Vector3(x, 0, z), dead: false,
   });
+}
+// 敵の魔弾
+const enemyBolts = [];
+function shootEnemyBolt(origin, dir) {
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), new THREE.MeshBasicMaterial({ color: 0xe8c8ff }));
+  g.add(core);
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xb05fff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+  halo.scale.set(1.7, 1.7, 1); g.add(halo);
+  g.position.copy(origin);
+  scene.add(g);
+  enemyBolts.push({ g, dir: dir.clone(), life: 3 });
 }
 const enemySpawns = [];
 for (let i = 0; i < 9; i++) {
@@ -1207,6 +1477,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Digit5') trySkill('shield');
   if (e.code === 'KeyJ') trySkill('sword');
   if (e.code === 'KeyK') beamWanted = true;
+  if (e.code === 'KeyM') { const b = document.getElementById('bgm'); b.muted = !b.muted; }
 });
 addEventListener('keyup', e => {
   keys[e.code] = false;
@@ -1372,8 +1643,9 @@ function damageEnemy(e, dmg, knockDir = null) {
   if (e.hp <= 0) {
     e.dead = true;
     sfx.enemyDie();
-    burst(e.pos.clone().add(new THREE.Vector3(0, 1.4, 0)), 0xb86fff, 36, 8, 0.5);
-    burst(e.pos.clone().add(new THREE.Vector3(0, 1.4, 0)), 0xfff0c8, 14, 5, 0.3);
+    const burstCol = e.type === 'wisp' ? 0x7fd8ff : 0xb86fff;
+    burst(e.pos.clone().add(new THREE.Vector3(0, e.aimY, 0)), burstCol, 36, 8, 0.5);
+    burst(e.pos.clone().add(new THREE.Vector3(0, e.aimY, 0)), 0xfff0c8, 14, 5, 0.3);
     scene.remove(e.model.g);
     e.bar.remove();
     kills++; score += 120;
@@ -1552,6 +1824,9 @@ titleEl.addEventListener('click', () => {
   started = true;
   titleEl.style.display = 'none';
   if (audio && audio.state === 'suspended') audio.resume();
+  const bgm = document.getElementById('bgm');
+  bgm.volume = 0.45;
+  bgm.play().catch(() => {});
   canvas.requestPointerLock();
   const h = document.getElementById('hint');
   h._t = setTimeout(() => h.style.opacity = 0, 9000);
@@ -1645,6 +1920,9 @@ function update(dt, t) {
   const swing = Math.sin(ph) * 0.85 * runRatio;
   pm.legL.rotation.x = swing;
   pm.legR.rotation.x = -swing;
+  pm.kneeL.rotation.x = Math.max(0, Math.sin(ph + 1.1)) * 1.0 * runRatio;
+  pm.kneeR.rotation.x = Math.max(0, Math.sin(ph + 1.1 + Math.PI)) * 1.0 * runRatio;
+  pm.elbowL.rotation.x = -0.25 - runRatio * 0.5;
   pm.hips.position.y = 0.92 + Math.abs(Math.sin(ph)) * 0.07 * runRatio + Math.sin(t * 1.8) * 0.012;
   pm.hips.rotation.x = runRatio * 0.14;
   pm.head.rotation.x = -runRatio * 0.1 + Math.sin(t * 1.3) * 0.02;
@@ -1656,6 +1934,7 @@ function update(dt, t) {
     const e = k < 0.4 ? k / 0.4 : 1 - (k - 0.4) / 0.6 * 0.3;
     pm.armR.g.rotation.x = -2.0 * e;
     pm.armR.g.rotation.z = player.attackDir * (0.9 - 1.8 * k);
+    pm.elbowR.rotation.x = -0.15;
     slashTrail.material.opacity = Math.max(0, 0.85 * (1 - k * 1.3));
     slashTrail.position.copy(player.pos).add(new THREE.Vector3(0, 1.25, 0));
     slashTrail.rotation.z = -player.heading + Math.PI / 2 + player.attackDir * (1.6 - k * 3.2);
@@ -1666,6 +1945,7 @@ function update(dt, t) {
     pm.g.rotation.y = player.heading + k * Math.PI * 2 * 1.0;
     pm.armR.g.rotation.x = -Math.PI / 2.4;
     pm.armL.g.rotation.x = -Math.PI / 2.6;
+    pm.elbowR.rotation.x = -0.4;
     slashTrail.material.opacity = 0.8 * Math.sin(k * Math.PI);
     slashTrail.position.copy(player.pos).add(new THREE.Vector3(0, 1.25, 0));
     slashTrail.rotation.z = -pm.g.rotation.y + Math.PI / 2;
@@ -1673,14 +1953,17 @@ function update(dt, t) {
   } else if (beaming) {
     pm.armR.g.rotation.x = lerp(pm.armR.g.rotation.x, -Math.PI / 2 + camPitch * 0.6, damp(16, dt));
     pm.armR.g.rotation.z = lerp(pm.armR.g.rotation.z, 0, damp(16, dt));
+    pm.elbowR.rotation.x = lerp(pm.elbowR.rotation.x, -0.05, damp(16, dt));
     pm.armL.g.rotation.x = lerp(pm.armL.g.rotation.x, -0.5 - Math.sin(ph) * 0.2 * runRatio, damp(10, dt));
     slashTrail.material.opacity = Math.max(0, slashTrail.material.opacity - dt * 5);
   } else if (player.castT > 0) {
     pm.armR.g.rotation.x = -Math.PI / 2;
+    pm.elbowR.rotation.x = -0.1;
     slashTrail.material.opacity = Math.max(0, slashTrail.material.opacity - dt * 5);
   } else {
     pm.armR.g.rotation.x = lerp(pm.armR.g.rotation.x, -swing * 0.6, damp(10, dt));
     pm.armR.g.rotation.z = lerp(pm.armR.g.rotation.z, 0.12, damp(10, dt));
+    pm.elbowR.rotation.x = lerp(pm.elbowR.rotation.x, -0.25 - runRatio * 0.5, damp(10, dt));
     pm.armL.g.rotation.x = lerp(pm.armL.g.rotation.x, swing * 0.6, damp(10, dt));
     slashTrail.material.opacity = Math.max(0, slashTrail.material.opacity - dt * 5);
   }
@@ -1702,7 +1985,7 @@ function update(dt, t) {
     let bestT = 28, hitEnemy = null;
     for (const e of enemies) {
       if (e.dead) continue;
-      const toE = new THREE.Vector3().subVectors(e.pos, hand).add(new THREE.Vector3(0, 1.4, 0));
+      const toE = new THREE.Vector3().subVectors(e.pos, hand).add(new THREE.Vector3(0, e.aimY, 0));
       const along = toE.dot(dir);
       if (along < 1 || along > 30) continue;
       const perp = toE.clone().addScaledVector(dir, -along).length();
@@ -1710,7 +1993,7 @@ function update(dt, t) {
     }
     beamEnd.copy(hand).addScaledVector(dir, bestT);
     if (hitEnemy) {
-      beamEnd.copy(hitEnemy.pos).add(new THREE.Vector3(0, 1.4, 0));
+      beamEnd.copy(hitEnemy.pos).add(new THREE.Vector3(0, hitEnemy.aimY, 0));
       // ダメージはまとめて適用(数字と効果音の毎フレーム連発を防ぐ)
       hitEnemy.beamAcc = (hitEnemy.beamAcc || 0) + 46 * dt;
       hitEnemy.hitFlash = 0.1;
@@ -1750,7 +2033,7 @@ function update(dt, t) {
     let explode = fb.life <= 0 || fb.g.position.y < getHeight(fb.g.position.x, fb.g.position.z) + 0.2;
     for (const e of enemies) {
       if (e.dead) continue;
-      if (fb.g.position.distanceTo(e.pos.clone().add(new THREE.Vector3(0, 1.4, 0))) < 1.6) explode = true;
+      if (fb.g.position.distanceTo(e.pos.clone().add(new THREE.Vector3(0, e.aimY, 0))) < 1.6) explode = true;
     }
     if (explode) {
       burst(fb.g.position, 0xffaa50, 34, 9, 0.55);
@@ -1758,11 +2041,28 @@ function update(dt, t) {
       blip(90, 0.4, 'sawtooth', 0.2, 0.4);
       for (const e of enemies) {
         if (e.dead) continue;
-        const d = fb.g.position.distanceTo(e.pos.clone().add(new THREE.Vector3(0, 1.4, 0)));
+        const d = fb.g.position.distanceTo(e.pos.clone().add(new THREE.Vector3(0, e.aimY, 0)));
         if (d < 4.5) damageEnemy(e, 55 * clamp(1 - d / 5, 0.3, 1));
       }
       scene.remove(fb.g);
       fireballs.splice(i, 1);
+    }
+  }
+
+  // ----- 敵の魔弾 -----
+  for (let i = enemyBolts.length - 1; i >= 0; i--) {
+    const b = enemyBolts[i];
+    b.life -= dt;
+    b.g.position.addScaledVector(b.dir, 13 * dt);
+    let gone = b.life <= 0 || b.g.position.y < getHeight(b.g.position.x, b.g.position.z);
+    if (!gone && !player.dead && b.g.position.distanceTo(player.pos.clone().add(new THREE.Vector3(0, 1.2, 0))) < 1.1) {
+      hurtPlayer(10 + Math.random() * 4);
+      gone = true;
+    }
+    if (gone) {
+      burst(b.g.position, 0xb05fff, 12, 4, 0.3);
+      scene.remove(b.g);
+      enemyBolts.splice(i, 1);
     }
   }
 
@@ -1772,7 +2072,7 @@ function update(dt, t) {
     const toP = new THREE.Vector3().subVectors(player.pos, e.pos); toP.y = 0;
     const dist = toP.length();
     if (e.state === 'wander') {
-      if (dist < 22 && !player.dead) e.state = 'chase';
+      if (dist < (e.type === 'wisp' ? 26 : 22) && !player.dead) e.state = 'chase';
       if (e.pos.distanceTo(e.target) < 1.5 || Math.random() < dt * 0.2) {
         e.target.set(e.home.x + rand(-12, 12), 0, e.home.z + rand(-12, 12));
       }
@@ -1781,7 +2081,21 @@ function update(dt, t) {
         dirW.normalize();
         e.pos.x += dirW.x * 1.6 * dt; e.pos.z += dirW.z * 1.6 * dt;
       }
-    } else { // chase
+    } else if (e.type === 'wisp') { // 射手: 距離を保って魔弾を放つ
+      if (dist > 42 || player.dead) e.state = 'wander';
+      toP.normalize();
+      if (dist < 9) { e.pos.x -= toP.x * 3.6 * dt; e.pos.z -= toP.z * 3.6 * dt; }
+      else if (dist > 17) { e.pos.x += toP.x * 3.6 * dt; e.pos.z += toP.z * 3.6 * dt; }
+      e.shootT -= dt;
+      if (e.shootT <= 0 && dist < 32 && !player.dead) {
+        e.shootT = rand(2.0, 3.0);
+        const from = e.pos.clone(); from.y += e.aimY;
+        const to = player.pos.clone(); to.y += 1.2;
+        shootEnemyBolt(from, to.sub(from).normalize());
+        e.hitFlash = Math.max(e.hitFlash, 0.12);
+        blip(740, 0.22, 'sine', 0.1, 0.45);
+      }
+    } else { // ゴーレム: 近接追跡
       if (dist > 38 || player.dead) e.state = 'wander';
       if (dist > 2.4) {
         toP.normalize();
@@ -1800,20 +2114,36 @@ function update(dt, t) {
     e.pos.y = lerp(e.pos.y, getHeight(e.pos.x, e.pos.z), damp(10, dt));
     // 演出
     const m = e.model;
-    m.core.position.y = 1.5 + Math.sin(t * 2 + e.ph) * 0.15;
-    m.core.rotation.y += dt * (e.state === 'chase' ? 3 : 0.8);
-    m.core.rotation.x += dt * 0.7;
     const flash = e.hitFlash > 0;
     e.hitFlash = Math.max(0, e.hitFlash - dt);
-    m.core.material.emissiveIntensity = flash ? 3.2 : (e.windup > 0.35 ? 2.4 : 1.1);
+    if (e.type === 'wisp') {
+      m.core.position.y = 2.1 + Math.sin(t * 2.4 + e.ph) * 0.18;
+      m.hood.position.y = m.core.position.y + 0.42;
+      m.hood.rotation.y += dt * 0.8;
+      m.ring.position.y = m.core.position.y - 0.25;
+      m.ring.rotation.x = Math.PI / 2 + Math.sin(t * 1.8 + e.ph) * 0.25;
+      m.ring.rotation.y = Math.cos(t * 1.5 + e.ph) * 0.25;
+      for (let i = 0; i < m.tentacles.length; i++) {
+        const tn = m.tentacles[i];
+        tn.position.y = m.core.position.y - 0.2;
+        tn.rotation.x = Math.sin(t * 2.6 + i * 1.3 + e.ph) * 0.22;
+        tn.rotation.z = Math.cos(t * 2.2 + i * 0.9 + e.ph) * 0.22;
+      }
+      m.core.material.emissiveIntensity = flash ? 3.2 : 1.3 + Math.sin(t * 3 + e.ph) * 0.25;
+    } else {
+      m.core.position.y = 1.5 + Math.sin(t * 2 + e.ph) * 0.15;
+      m.core.rotation.y += dt * (e.state === 'chase' ? 3 : 0.8);
+      m.core.rotation.x += dt * 0.7;
+      m.core.material.emissiveIntensity = flash ? 3.2 : (e.windup > 0.35 ? 2.4 : 1.1);
+      for (const r of m.rocks) {
+        r.userData.a += dt * r.userData.sp;
+        r.position.set(Math.cos(r.userData.a) * r.userData.rad, r.userData.h + Math.sin(t * 1.6 + r.userData.a * 2) * 0.12, Math.sin(r.userData.a) * r.userData.rad);
+      }
+    }
     m.eye.material.opacity = 0.75 + Math.sin(t * 5 + e.ph) * 0.2;
     m.eye.position.y = m.core.position.y;
-    for (const r of m.rocks) {
-      r.userData.a += dt * r.userData.sp;
-      r.position.set(Math.cos(r.userData.a) * r.userData.rad, r.userData.h + Math.sin(t * 1.6 + r.userData.a * 2) * 0.12, Math.sin(r.userData.a) * r.userData.rad);
-    }
     // HPバー
-    const sp2 = projectToScreen(e.pos.clone().add(new THREE.Vector3(0, 2.9, 0)));
+    const sp2 = projectToScreen(e.pos.clone().add(new THREE.Vector3(0, e.barY, 0)));
     if (sp2.behind || dist > 45) { e.bar.style.display = 'none'; }
     else {
       e.bar.style.display = 'block';
@@ -1845,6 +2175,20 @@ function update(dt, t) {
       burst(cst.position, 0x8ff4ff, 24, 5, 0.4);
       player.mp = Math.min(player.maxMp, player.mp + 25);
     }
+  }
+
+  // ----- 蝶 -----
+  for (const b of butterflies) {
+    const a = t * b.sp + b.ph;
+    b.g.position.set(
+      b.base.x + Math.cos(a) * b.r,
+      b.base.y + Math.sin(t * 1.3 + b.ph) * 0.5,
+      b.base.z + Math.sin(a * 1.3) * b.r
+    );
+    b.g.rotation.y = -a + Math.PI / 2;
+    const flap = Math.sin(t * 16 + b.ph) * 0.8;
+    b.wl.rotation.y = flap;
+    b.wr.rotation.y = Math.PI - flap;
   }
 
   // ----- 環境アニメ -----
